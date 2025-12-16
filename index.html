@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PixelForge Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom utility for pixel art rendering */
+      .pixelated {
+        image-rendering: pixelated;
+        image-rendering: -moz-crisp-edges;
+        image-rendering: crisp-edges;
+      }
+      @import url('https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600;700&display=swap');
+    </style>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: ['VT323', 'monospace'],
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              retro: {
+                dark: '#1a1b26',
+                panel: '#24283b',
+                accent: '#7aa2f7',
+                success: '#9ece6a',
+                warning: '#e0af68',
+                error: '#f7768e',
+                border: '#414868'
+              }
+            }
+          }
+        }
+      }
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.33.0"
+  }
+}
+</script>
+</head>
+  <body class="bg-retro-dark text-slate-200 min-h-screen">
+    <div id="root"></div>
+  </body>
+</html>

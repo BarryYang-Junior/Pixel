@@ -1,0 +1,5 @@
+{
+  "name": "PixelForge Engine",
+  "description": "A high-precision AI engine that refactors images into specific pixel art styles based on reference imagery.",
+  "requestFramePermissions": []
+}
