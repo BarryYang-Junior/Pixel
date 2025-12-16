@@ -82,11 +82,6 @@ const generateStrictPalette = (data: Uint8ClampedArray, maxColors: number): Pale
       let idx1 = -1;
       let idx2 = -1;
 
-      // Optimization: If palette is huge, just trim lowest frequency or pre-cluster?
-      // For pixel art res ~100x100, histogram size usually < 1000. O(N^2) is acceptable.
-      // But let's be safe. If > 200 colors, randomly sample? No, stick to exact for quality.
-      // If > 256 colors, do a pass to merge nearest neighbors only if dist < threshold
-      
       for (let i = 0; i < palette.length - 1; i++) {
         for (let j = i + 1; j < palette.length; j++) {
           const d = distSq(palette[i], palette[j]);
@@ -208,7 +203,6 @@ const enforcePixelGrid = async (base64Data: string, resolution: number, maxColor
       }
 
       // Filter out unused colors from palette (if quantization left some stragglers not mapped to?)
-      // Not strictly necessary with this logic but good for cleanliness.
       const usedPalette = palette.filter(p => p.count > 0).sort((a,b) => a.id - b.id);
 
       // Pass 2: Draw blocks, lines, and numbers
@@ -254,80 +248,60 @@ const enforcePixelGrid = async (base64Data: string, resolution: number, maxColor
   });
 };
 
-export const reprocessPixelArt = async (
-  rawBase64: string, 
-  resolution: number, 
-  maxColors: number
-): Promise<GenerationResult> => {
-  const result = await enforcePixelGrid(rawBase64, resolution, maxColors);
-  return { ...result, rawBase64 };
-};
-
-export const generatePixelArtRefactor = async (
+// STEP 1: Generate the Cartoon/Stylized Draft
+export const generateCharacterDraft = async (
   referenceImages: UploadedImage[],
   targetImage: UploadedImage,
-  resolution: number,
   removeBackground: boolean,
   userPrompt: string = "",
   maxColors: number = 32
-): Promise<GenerationResult> => {
+): Promise<string> => {
   if (!process.env.API_KEY) {
     throw new Error("API Key is missing in environment variables.");
   }
 
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
   const referenceParts = await Promise.all(referenceImages.map(img => fileToGenerativePart(img.file)));
   const targetPart = await Promise.all([fileToGenerativePart(targetImage.file)]);
 
   const bgInstruction = removeBackground 
-    ? "BACKGROUND: PURE WHITE (#FFFFFF). Do not draw any background scenery. The subject must be isolated on white or transparent. Output ONLY the character/object." 
-    : "BACKGROUND: Create a simple, fitting retro background compatible with the style.";
+    ? "BACKGROUND: PURE WHITE (#FFFFFF). Output ONLY the character/object." 
+    : "BACKGROUND: Simple, clean, fitting retro background.";
 
   const promptInstruction = userPrompt.trim() 
-    ? `USER OVERRIDE INSTRUCTION: "${userPrompt}". 
-       IMPORTANT: You must balance the visual structure of the TARGET INPUT with this USER INSTRUCTION. 
-       Give approximately 50% weight to the original image structure and 50% weight to this text instruction. 
-       Modify the target image to match this description while maintaining the pixel art style.` 
-    : "Strictly maintain the subject and pose of the TARGET INPUT.";
+    ? `USER OVERRIDE: "${userPrompt}".` 
+    : "";
 
-  // Enhanced prompt to focus on distinct block separation and readability
   const prompt = `
-    ROLE: You are an 8-bit Mosaic Art Designer.
+    ROLE: You are a Vector Art & Pixel Style Concept Artist.
     
     TASK:
-    1. Analyze the STYLE REFERENCE images (first ${referenceImages.length} images) for palette and shading.
-    2. Look at the TARGET INPUT (last image).
-    3. ${promptInstruction}
-    4. CREATE A MOSAIC BLUEPRINT.
+    1. Analyze STYLE REFERENCES for palette/shading.
+    2. Analyze TARGET INPUT.
+    3. RECOMPOSE and REDRAW the target subject to create a square concept art.
+    4. ${promptInstruction}
     
-    CRITICAL CONSTRAINTS:
-    - OUTPUT FORMAT: STRICT 1:1 SQUARE ASPECT RATIO.
-    - VISUAL CLARITY: The image must be composed of solid, distinct colored blocks. 
-    - GRID: Design this as if it is being drawn on a strict ${resolution}x${resolution} pixel grid.
-    - PALETTE: High contrast, limited color palette (STRICTLY MAX ${maxColors} COLORS). This is for a physical mosaic, so colors must be distinct and easy to separate.
-    - ABSTRACTION: Simplify complex details. A single pixel is a large physical object in the final product.
-    - FOCUS: ${removeBackground ? 'STRICTLY ONLY CHARACTER AND ITEMS.' : 'Character and environment.'}
+    CRITICAL COMPOSITION RULES (MANDATORY):
+    - EXTREME FILL: The character/object MUST occupy 95-100% of the canvas height or width.
+    - NO PADDING: Do not leave ANY margin. The subject's hair/hat/shoes should touch the edges of the frame.
+    - REFRAME: If the target is a full body, zoom in or widen the stance to fill the square. If it is a portrait, ensure the face/bust fills the ENTIRE square.
+    - GOAL: Maximize the number of pixels used by the subject. Background space is wasted pixels.
+    
+    STYLE CONSTRAINTS:
+    - ASPECT RATIO: 1:1 SQUARE.
+    - STYLE: Flat colors, hard edges, NO gradients, NO blurring.
+    - PALETTE: Use a LIMITED PALETTE of approximately ${maxColors} distinct colors.
+    - SHAPES: Simplify details into clear "zones" of color.
     - ${bgInstruction}
     
-    Do NOT produce gradients or blurry edges. Produce hard-edged, blocky pixel art.
+    Output a high-quality, clean image that looks like it has been cropped specifically for a game icon or sprite.
   `;
 
   try {
     const response = await ai.models.generateContent({
       model: MODEL_NAME,
-      contents: {
-        parts: [
-          ...referenceParts, 
-          ...targetPart,     
-          { text: prompt }
-        ]
-      },
-      config: {
-        imageConfig: {
-          aspectRatio: "1:1"
-        }
-      }
+      contents: { parts: [...referenceParts, ...targetPart, { text: prompt }] },
+      config: { imageConfig: { aspectRatio: "1:1" } }
     });
 
     let rawBase64 = null;
@@ -338,16 +312,34 @@ export const generatePixelArtRefactor = async (
       }
     }
 
-    if (!rawBase64) {
-      throw new Error("No image data found in response.");
-    }
-
-    // Post-processing: Physically downsample to grid, then UPSCALE with GRID LINES and NUMBERS
-    const processed = await enforcePixelGrid(rawBase64, resolution, maxColors);
-    return { ...processed, rawBase64 };
-    
+    if (!rawBase64) throw new Error("No image data found in response.");
+    return rawBase64;
   } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    throw new Error(error.message || "Failed to generate pixel art.");
+    console.error("Gemini API Error (Draft):", error);
+    throw new Error(error.message || "Failed to generate draft.");
   }
+};
+
+// STEP 2: Process Draft into Blueprint (Grid + Quantization)
+export const reprocessPixelArt = async (
+  rawBase64: string, 
+  resolution: number, 
+  maxColors: number
+): Promise<GenerationResult> => {
+  const result = await enforcePixelGrid(rawBase64, resolution, maxColors);
+  return { ...result, rawBase64 };
+};
+
+// Deprecated single-step function, but kept for compatibility if needed, 
+// though UI will switch to 2-step.
+export const generatePixelArtRefactor = async (
+  referenceImages: UploadedImage[],
+  targetImage: UploadedImage,
+  resolution: number,
+  removeBackground: boolean,
+  userPrompt: string = "",
+  maxColors: number = 32
+): Promise<GenerationResult> => {
+  const rawBase64 = await generateCharacterDraft(referenceImages, targetImage, removeBackground, userPrompt, maxColors);
+  return await reprocessPixelArt(rawBase64, resolution, maxColors);
 };

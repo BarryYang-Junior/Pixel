@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { UploadedImage, AppStatus, GenerationResult } from './types';
-import { generatePixelArtRefactor, reprocessPixelArt } from './services/geminiService';
+import { generateCharacterDraft, reprocessPixelArt } from './services/geminiService';
 import { Button } from './components/Button';
 import { ImageUploader } from './components/ImageUploader';
 
@@ -8,13 +8,17 @@ const App: React.FC = () => {
   const [refImages, setRefImages] = useState<UploadedImage[]>([]);
   const [targetImage, setTargetImage] = useState<UploadedImage | null>(null);
   const [userPrompt, setUserPrompt] = useState<string>('');
+  
+  // State for the 2-step process
+  const [draftBase64, setDraftBase64] = useState<string | null>(null);
   const [result, setResult] = useState<GenerationResult | null>(null);
+  
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  
   const [resolution, setResolution] = useState<number>(64);
   const [removeBackground, setRemoveBackground] = useState<boolean>(false);
   const [maxColors, setMaxColors] = useState<number>(32);
-  const [isReprocessing, setIsReprocessing] = useState<boolean>(false);
 
   const handleRefUpload = useCallback((files: File[]) => {
     const newImages = files.map(file => ({
@@ -24,7 +28,6 @@ const App: React.FC = () => {
     }));
     
     setRefImages(prev => {
-      // Limit to 10 images max as per prompt requirement
       const combined = [...prev, ...newImages];
       return combined.slice(0, 10);
     });
@@ -38,8 +41,9 @@ const App: React.FC = () => {
         file,
         previewUrl: URL.createObjectURL(file)
       });
-      // Reset result when new target is uploaded
+      // Reset everything when new target is uploaded
       setResult(null);
+      setDraftBase64(null);
       setStatus(AppStatus.IDLE);
     }
   }, []);
@@ -48,7 +52,8 @@ const App: React.FC = () => {
     setRefImages(prev => prev.filter(img => img.id !== id));
   };
 
-  const handleGenerate = async () => {
+  // Step 1: Generate Draft
+  const handleGenerateDraft = async () => {
     if (!targetImage || refImages.length < 2) {
       setErrorMsg("Please upload at least 2 reference images and 1 target image.");
       return;
@@ -56,33 +61,45 @@ const App: React.FC = () => {
 
     setStatus(AppStatus.GENERATING);
     setErrorMsg('');
+    setResult(null); // Clear previous result if any
 
     try {
-      const data = await generatePixelArtRefactor(refImages, targetImage, resolution, removeBackground, userPrompt, maxColors);
+      // Step 1: Get the intermediate cartoon image
+      const rawData = await generateCharacterDraft(refImages, targetImage, removeBackground, userPrompt, maxColors);
+      setDraftBase64(rawData);
+      setStatus(AppStatus.SUCCESS); 
+    } catch (err: any) {
+      console.error(err);
+      setStatus(AppStatus.ERROR);
+      setErrorMsg(err.message || "Failed to generate draft.");
+    }
+  };
+
+  // Step 2: Finalize Blueprint (Process Draft)
+  const handleFinalize = async () => {
+    if (!draftBase64) return;
+
+    setStatus(AppStatus.GENERATING);
+    try {
+      const data = await reprocessPixelArt(draftBase64, resolution, maxColors);
       setResult(data);
       setStatus(AppStatus.SUCCESS);
     } catch (err: any) {
       console.error(err);
       setStatus(AppStatus.ERROR);
-      setErrorMsg(err.message || "An unexpected error occurred.");
+      setErrorMsg("Failed to process blueprint.");
     }
   };
 
-  const handleReprocess = async () => {
-    if (!result?.rawBase64) return;
-    
-    setIsReprocessing(true);
-    try {
-      const newData = await reprocessPixelArt(result.rawBase64, resolution, maxColors);
-      // Preserve the rawBase64 in the new result so we can reprocess again later
-      setResult({ ...newData, rawBase64: result.rawBase64 });
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg("Failed to reprocess image.");
-    } finally {
-      setIsReprocessing(false);
-    }
+  const handleDiscardDraft = () => {
+    setDraftBase64(null);
+    setResult(null);
+    setStatus(AppStatus.IDLE);
   };
+
+  // Helper to determine what is currently being shown
+  const isShowingDraft = draftBase64 && !result;
+  const isShowingResult = !!result;
 
   return (
     <div className="max-w-7xl mx-auto p-4 md:p-8 font-sans">
@@ -98,7 +115,7 @@ const App: React.FC = () => {
         </div>
         <div className="hidden md:block text-right">
           <div className="text-xs text-retro-warning font-mono border border-retro-warning px-2 py-1 inline-block rounded">
-            v1.4.0 // PREVIEW_EDITOR
+            v2.0.0 // DUAL_PHASE
           </div>
         </div>
       </header>
@@ -157,7 +174,11 @@ const App: React.FC = () => {
                 <div className="relative w-full h-full border-2 border-retro-accent rounded overflow-hidden bg-retro-dark group">
                   <img src={targetImage.previewUrl} alt="target" className="w-full h-full object-contain" />
                   <button 
-                    onClick={() => setTargetImage(null)}
+                    onClick={() => {
+                        setTargetImage(null);
+                        setDraftBase64(null);
+                        setResult(null);
+                    }}
                     className="absolute top-2 right-2 bg-retro-dark/80 text-white px-3 py-1 font-mono text-sm border border-white hover:bg-white hover:text-black transition-colors"
                   >
                     CHANGE
@@ -228,13 +249,15 @@ const App: React.FC = () => {
                     if (!isNaN(val)) setMaxColors(val);
                   }}
                   onBlur={() => {
-                     // Clamp on blur
                      setMaxColors(prev => Math.max(2, Math.min(256, prev)));
                   }}
                   className="w-full bg-retro-dark border border-retro-border rounded p-2 font-mono text-slate-200 focus:border-retro-accent outline-none"
                 />
                 <span className="text-xs text-slate-500 font-mono whitespace-nowrap">BLOCKS</span>
               </div>
+              <p className="text-[10px] text-slate-500 font-mono mt-1 px-2">
+                Applies to both Draft generation and Final Blueprint.
+              </p>
             </div>
 
             <div className="bg-retro-dark/50 p-3 rounded border border-retro-border mb-4">
@@ -269,45 +292,62 @@ const App: React.FC = () => {
                 </div>
               </label>
             </div>
-            
-            {/* Reprocess Button - Only shows when we have a result */}
-            {result?.rawBase64 && (
-              <button
-                onClick={handleReprocess}
-                disabled={isReprocessing}
-                className="w-full bg-retro-panel border border-retro-accent text-retro-accent hover:bg-retro-accent hover:text-retro-dark font-mono py-2 rounded transition-colors text-sm uppercase flex items-center justify-center gap-2"
-              >
-                {isReprocessing ? (
-                  <>
-                    <span className="animate-spin h-3 w-3 border-2 border-current border-t-transparent rounded-full"></span>
-                    CALCULATING...
-                  </>
-                ) : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
-                    UPDATE BLUEPRINT
-                  </>
-                )}
-              </button>
-            )}
 
           </section>
 
           {/* Action Area */}
-          <div className="pt-4">
+          <div className="pt-4 space-y-3">
              {errorMsg && (
                <div className="mb-4 p-3 bg-retro-error/20 border border-retro-error text-retro-error font-mono text-sm">
                  ERROR: {errorMsg}
                </div>
              )}
-             <Button 
-               onClick={handleGenerate} 
-               className="w-full text-xl py-4"
-               disabled={status === AppStatus.GENERATING || !targetImage || refImages.length < 2}
-               isLoading={status === AppStatus.GENERATING}
-             >
-               {status === AppStatus.GENERATING ? 'REFACTORING...' : 'INITIATE REFACTOR'}
-             </Button>
+
+             {/* Logic for Buttons based on State */}
+             {!draftBase64 ? (
+                <Button 
+                  onClick={handleGenerateDraft} 
+                  className="w-full text-xl py-4"
+                  disabled={status === AppStatus.GENERATING || !targetImage || refImages.length < 2}
+                  isLoading={status === AppStatus.GENERATING}
+                >
+                  {status === AppStatus.GENERATING ? 'GENERATING CONCEPT...' : 'STEP 1: GENERATE DRAFT CONCEPT'}
+                </Button>
+             ) : (
+                <div className="space-y-3">
+                  {/* Step 2 Actions */}
+                  <Button 
+                    onClick={handleFinalize} 
+                    className="w-full text-xl py-4 border-b-4 border-green-800 bg-retro-success hover:bg-green-400 text-retro-dark"
+                    disabled={status === AppStatus.GENERATING}
+                    isLoading={status === AppStatus.GENERATING}
+                  >
+                    {status === AppStatus.GENERATING ? 'CALCULATING BLUEPRINT...' : 'STEP 2: FINALIZE BLUEPRINT'}
+                  </Button>
+                  
+                  <div className="grid grid-cols-2 gap-3">
+                     <Button 
+                        onClick={handleGenerateDraft}
+                        variant="secondary"
+                        disabled={status === AppStatus.GENERATING}
+                        className="text-sm py-3"
+                     >
+                        RETRY DRAFT
+                     </Button>
+                     <Button 
+                        onClick={handleDiscardDraft}
+                        variant="danger"
+                        disabled={status === AppStatus.GENERATING}
+                         className="text-sm py-3"
+                     >
+                        CLEAR ALL
+                     </Button>
+                  </div>
+                  <p className="text-center text-xs font-mono text-slate-400 mt-2">
+                    Adjust Grid Resolution or Max Colors above, then click Finalize to update the blueprint.
+                  </p>
+                </div>
+             )}
           </div>
 
         </div>
@@ -318,7 +358,9 @@ const App: React.FC = () => {
           {/* Output Image */}
           <section className="bg-black/40 rounded-xl border-2 border-retro-border p-1 flex flex-col">
             <div className="bg-retro-panel px-4 py-2 flex justify-between items-center border-b border-retro-border">
-              <h2 className="font-mono text-slate-300">OUTPUT TERMINAL</h2>
+              <h2 className="font-mono text-slate-300">
+                {isShowingResult ? 'FINAL BLUEPRINT' : isShowingDraft ? 'DRAFT CONCEPT PREVIEW' : 'OUTPUT TERMINAL'}
+              </h2>
               <div className="flex gap-2">
                 <div className="w-3 h-3 rounded-full bg-red-500"></div>
                 <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
@@ -328,31 +370,51 @@ const App: React.FC = () => {
 
             <div className="flex-1 flex items-center justify-center p-4 min-h-[400px] relative overflow-hidden bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
               
-              {status === AppStatus.IDLE && !result && (
+              {/* Idle State */}
+              {status === AppStatus.IDLE && !draftBase64 && !result && (
                 <div className="text-center text-slate-600 font-mono">
                   <p className="text-6xl mb-4 opacity-20">WAITING</p>
                   <p>System Ready. Awaiting Inputs.</p>
                 </div>
               )}
 
+              {/* Generating State */}
               {status === AppStatus.GENERATING && (
                 <div className="text-center">
                   <div className="inline-block w-16 h-16 border-4 border-retro-accent border-t-transparent rounded-full animate-spin mb-4"></div>
-                  <p className="font-mono text-retro-accent animate-pulse">LEARNING STYLE VECTORS...</p>
-                  <p className="font-mono text-xs text-slate-500 mt-2">Enforcing {resolution}x{resolution} Grid... Calculating Color Map...</p>
+                  <p className="font-mono text-retro-accent animate-pulse">
+                    {draftBase64 ? 'PROCESSING GRID & COLORS...' : 'GENERATING DRAFT CONCEPT...'}
+                  </p>
                 </div>
               )}
 
-              {result && (
+              {/* Draft View */}
+              {isShowingDraft && !isShowingResult && status !== AppStatus.GENERATING && (
+                <div className="relative w-full h-full flex items-center justify-center">
+                   <div className="relative max-w-full max-h-full border-4 border-retro-warning shadow-[0_0_20px_rgba(255,165,0,0.2)]">
+                      <img 
+                        src={`data:image/png;base64,${draftBase64}`}
+                        alt="Draft Concept" 
+                        className="max-w-full max-h-[600px] object-contain bg-checkered" 
+                      />
+                      <div className="absolute top-0 left-0 bg-retro-warning text-retro-dark text-xs font-mono px-2 py-1 font-bold">
+                        DRAFT MODE
+                      </div>
+                   </div>
+                </div>
+              )}
+
+              {/* Final Result View */}
+              {isShowingResult && (
                 <div className="relative w-full h-full flex items-center justify-center">
                    <div className="relative max-w-full max-h-full border-4 border-white shadow-[0_0_20px_rgba(255,255,255,0.2)]">
                       <img 
-                        src={result.imageUrl} 
+                        src={result!.imageUrl} 
                         alt="Generated Pixel Art" 
                         className="max-w-full max-h-[600px] pixelated object-contain bg-checkered" 
                       />
                       <div className="absolute bottom-0 left-0 bg-black/70 text-white text-xs font-mono px-2 py-1">
-                        {result.resolution}x{result.resolution} // {result.palette.length} COLORS
+                        {result!.resolution}x{result!.resolution} // {result!.palette.length} COLORS
                       </div>
                    </div>
                 </div>
@@ -360,20 +422,24 @@ const App: React.FC = () => {
             </div>
             
             {/* Download Actions */}
-            {result && (
-              <div className="bg-retro-panel p-4 border-t border-retro-border flex justify-end gap-4">
-                <a 
-                  href={result.imageUrl} 
-                  download="pixel-forge-blueprint.png"
-                  className="bg-retro-success text-retro-dark font-mono px-4 py-2 font-bold hover:bg-green-300 transition-colors uppercase"
-                >
-                  Download Blueprint
-                </a>
-              </div>
-            )}
+            <div className="bg-retro-panel p-4 border-t border-retro-border flex justify-between items-center">
+               <span className="text-xs font-mono text-slate-500">
+                  {isShowingDraft ? "Draft generated. Review shape and colors." : isShowingResult ? "Blueprint ready for export." : ""}
+               </span>
+               
+               {result && (
+                  <a 
+                    href={result.imageUrl} 
+                    download="pixel-forge-blueprint.png"
+                    className="bg-retro-success text-retro-dark font-mono px-4 py-2 font-bold hover:bg-green-300 transition-colors uppercase"
+                  >
+                    Download Blueprint
+                  </a>
+               )}
+            </div>
           </section>
 
-          {/* Palette Legend */}
+          {/* Palette Legend (Only for Final Result) */}
           {result && result.palette.length > 0 && (
             <section className="bg-retro-panel/30 p-4 rounded-xl border border-retro-border">
               <h2 className="text-xl font-mono text-slate-200 mb-4 flex justify-between items-center">
